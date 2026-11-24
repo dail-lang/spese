@@ -324,3 +324,38 @@ export function validateBackup(data) {
   if (!ok) return 'Il backup contiene spese non valide.';
   return null;
 }
+
+// ---------- monthly recap ----------
+
+export function monthRecap(expenses, categories, key, totalLimit = null) {
+  const [from, to] = monthRange(key);
+  const list = expensesInRange(expenses, from, to);
+  const { total, by } = sumBy(list);
+  const prevKey = shiftMonth(key, -1);
+  const [pf, pt] = monthRange(prevKey);
+  const prev = sumBy(expensesInRange(expenses, pf, pt));
+  const [y, m] = key.split('-').map(Number);
+
+  const cats = categories.map((c) => ({ c, v: by[c.id] || 0, p: prev.by[c.id] || 0 }));
+  const ranked = cats.filter((x) => x.v > 0).sort((a, b) => b.v - a.v);
+  const top = ranked[0] ? { category: ranked[0].c, amount: ranked[0].v, share: total ? ranked[0].v / total : 0 } : null;
+
+  let grew = null; let dropped = null;
+  for (const x of cats) {
+    const d = x.v - x.p;
+    if (d > 0 && (!grew || d > grew.diff)) grew = { category: x.c, diff: d };
+    if (d < 0 && (!dropped || d < dropped.diff)) dropped = { category: x.c, diff: d };
+  }
+
+  const biggest = list.reduce((a, e) => (!a || e.amount > a.amount ? e : a), null);
+  const limits = categories.filter((c) => c.limit).map((c) => ({ category: c, spent: by[c.id] || 0, limit: c.limit, ok: (by[c.id] || 0) <= c.limit }));
+  const total_ = totalLimit ? { spent: total, limit: totalLimit, ok: total <= totalLimit } : null;
+
+  return {
+    key, prevKey, total, count: list.length, prevTotal: prev.total,
+    diff: total - prev.total,
+    diffPct: prev.total ? (total - prev.total) / prev.total : null,
+    avgPerDay: Math.round(total / daysInMonth(y, m)),
+    top, grew, dropped, biggest, limits, totalLimit: total_,
+  };
+}

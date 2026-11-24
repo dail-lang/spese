@@ -2,7 +2,7 @@ import * as L from './logic.js';
 import { loadState, saveState, requestPersistence, uid, emptyState } from './store.js';
 import { icon, CATEGORY_ICONS, CATEGORY_COLORS } from './icons.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 let S = null; // persisted state
 const ui = {
@@ -12,7 +12,10 @@ const ui = {
   trendCat: null,
   trendSel: null,
   installHidden: false,
+  slide: null,
 };
+const countMemory = {};
+let suppressClick = false;
 
 // ---------- helpers ----------
 
@@ -58,6 +61,45 @@ function spend(month, categoryId = null) {
 
 function persist() {
   saveState(S).catch(() => toast('Impossibile salvare i dati su questo dispositivo.', { kind: 'over' }));
+}
+
+// ---------- haptics (iOS 18+: toggling a native switch fires the Taptic Engine) ----------
+
+let hapticEl = null;
+function haptic() {
+  try {
+    if (!hapticEl) {
+      hapticEl = document.createElement('label');
+      hapticEl.setAttribute('aria-hidden', 'true');
+      hapticEl.style.cssText = 'position:fixed;left:-200px;top:0;opacity:0;pointer-events:none';
+      hapticEl.innerHTML = '<input type="checkbox" switch tabindex="-1">';
+      document.body.appendChild(hapticEl);
+    }
+    hapticEl.click();
+  } catch { /* no haptics */ }
+}
+
+// ---------- animated numbers ----------
+
+const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function animateCounts(root) {
+  $$('[data-count]', root).forEach((el) => {
+    const to = Number(el.dataset.count);
+    const key = el.dataset.countKey || 'x';
+    const from = countMemory[key] ?? 0;
+    countMemory[key] = to;
+    const suffix = el.dataset.suffix || '';
+    if (from === to || reduceMotion()) { el.innerHTML = splitEuro(to) + suffix; return; }
+    const t0 = performance.now(); const dur = 750;
+    const step = (now) => {
+      const k = Math.min(1, (now - t0) / dur);
+      const e = 1 - (1 - k) ** 3;
+      el.innerHTML = splitEuro(Math.round(from + (to - from) * e)) + suffix;
+      if (k < 1 && el.isConnected) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
 }
 
 // ---------- refresh plumbing ----------
@@ -113,6 +155,7 @@ function checkLimits(month, categoryId, beforeCat, beforeTot) {
   if (lvlC) alerts.push(limitMsg(c.name, afterCat, c.limit, lvlC));
   const lvlT = L.crossedLevel(beforeTot, afterTot, S.settings.totalLimit);
   if (lvlT) alerts.push(limitMsg('Totale del mese', afterTot, S.settings.totalLimit, lvlT));
+  if (alerts.length) haptic();
   alerts.forEach((a, i) => setTimeout(() => {
     toast(a.text, { kind: a.level, ms: 5200 });
     notify(a.title, a.text);
@@ -166,8 +209,10 @@ function openSheet(html, { full = false, onClose = null, refresh: refreshFn = nu
 }
 
 function enableSwipeClose(sheet, close) {
-  const head = sheet.querySelector('.sheet-head');
-  if (!head) return;
+  $$('.sheet-head, .amount-display, .grab', sheet).forEach((h) => swipeHandle(sheet, h, close));
+}
+
+function swipeHandle(sheet, head, close) {
   let y0 = null; let dy = 0;
   head.addEventListener('pointerdown', (e) => {
     if (e.target.closest('button, input, select')) return;
@@ -214,10 +259,23 @@ function render(animate = true) {
   const v = $('#view');
   const views = { month: viewMonth, trend: viewTrend, recurring: viewRecurring, settings: viewSettings };
   v.innerHTML = views[ui.tab]();
-  if (animate) { v.classList.remove('view-enter'); void v.offsetWidth; v.classList.add('view-enter'); }
+  if (animate) {
+    const cls = ui.slide === 'next' ? 'view-next' : ui.slide === 'prev' ? 'view-prev' : 'view-enter';
+    v.classList.remove('view-enter', 'view-next', 'view-prev'); void v.offsetWidth; v.classList.add(cls);
+  }
+  ui.slide = null;
   renderTabs();
   fillBars(v, !animate);
+  animateCounts(v);
+  const h1 = $('.top h1', v);
+  $('#navbar span').textContent = h1 ? h1.textContent.trim() : '';
+  onScroll();
 }
+
+function onScroll() {
+  $('#navbar')?.classList.toggle('show', window.scrollY > 48);
+}
+window.addEventListener('scroll', onScroll, { passive: true });
 
 function fillBars(root, instant = false) {
   const bars = $$('.bar > i[data-w]', root);
@@ -280,12 +338,13 @@ function viewMonth() {
   const chips = [];
   if (upTotal) chips.push(`<span class="hero-chip">${icon('repeat')} In arrivo ${eur0(upTotal)}</span>`);
   if (list.length) chips.push(`<span class="hero-chip">${icon('tag')} ${list.length} ${list.length === 1 ? 'spesa' : 'spese'}</span>`);
+  if (!isCur && list.length) chips.push(`<button class="hero-chip btn-chip" type="button" data-action="recap" data-key="${key}">${icon('sparkle')} Riepilogo</button>`);
 
   const hero = `<section class="hero">
     <div class="hero-row">
       <div class="hero-main">
         <div class="hero-label">${isCur ? `Speso a ${monthName}` : `Speso a ${monthName} ${key.slice(0, 4)}`}</div>
-        <div class="hero-total num">${splitEuro(sum.total)}</div>
+        <div class="hero-total num" data-count="${sum.total}" data-count-key="hero">${splitEuro(sum.total)}</div>
         ${delta}
       </div>
       ${sum.total ? donut : ''}
@@ -310,6 +369,19 @@ function viewMonth() {
         I dati sono solo su questo telefono. ${last ? `Ultimo backup: ${shortDate(L.toISO(new Date(last)), true)}.` : ''}
         <br><button class="link" type="button" data-action="export-json">Esporta ora</button></div></div>`;
     }
+  }
+
+  // recap teaser: first 10 days of a new month, for last month
+  let teaser = '';
+  const prevKey = L.shiftMonth(curKey, -1);
+  if (isCur && L.parseISO(t).d <= 10 && !S.settings.recapSeen?.[prevKey] && S.expenses.some((e) => L.monthKey(e.date) === prevKey)) {
+    const r = L.monthRecap(S.expenses, S.categories, prevKey, S.settings.totalLimit);
+    teaser = `<section class="teaser" data-action="recap" data-key="${prevKey}" role="button" tabindex="0">
+      <div class="teaser-ic">${icon('sparkle')}</div>
+      <div class="teaser-body"><b>Il riepilogo di ${L.monthLabel(prevKey, false)} è pronto</b>
+        <span class="num">${eur0(r.total)} spesi${r.prevTotal ? ` · ${r.diff <= 0 ? '−' : '+'}${Math.abs(Math.round((r.diffPct || 0) * 100))}% sul mese prima` : ''}</span></div>
+      <button class="icon-btn" type="button" data-action="recap-dismiss" data-key="${prevKey}" aria-label="Nascondi">${icon('x')}</button>
+    </section>`;
   }
 
   // categories
@@ -371,6 +443,7 @@ function viewMonth() {
       <button class="icon-btn filled" type="button" data-action="search" aria-label="Cerca">${icon('search')}</button>
     </header>
     ${banners}
+    ${teaser}
     ${hero}
     ${showCats.length ? `<div class="section-title"><span>Per categoria</span></div><div class="list">${catRows}</div>` : ''}
     ${list.length ? `<div class="section-title"><span>Movimenti</span></div>${expHtml}` : empty}
@@ -381,12 +454,13 @@ function expRow(e, { withDate = false } = {}) {
   const c = cat(e.categoryId);
   const title = e.note ? esc(e.note) : esc(c.name);
   const sub = [e.note ? esc(c.name) : '', withDate ? shortDate(e.date) : ''].filter(Boolean).join(' · ');
-  return `<button class="exp-row" type="button" data-action="edit-exp" data-id="${e.id}">
+  return `<div class="swipe"><div class="swipe-bg" aria-hidden="true">${icon('trash')}<span>Elimina</span></div>
+  <button class="exp-row" type="button" data-action="edit-exp" data-id="${e.id}">
     ${chipIc(c, 'sm')}
     <div class="exp-main"><div class="exp-title">${title}</div>
       ${sub || e.recurringId ? `<div class="exp-sub">${e.recurringId ? icon('repeat') : ''}${sub || 'Ricorrente'}</div>` : ''}</div>
     <div class="exp-amount num">${eur(e.amount)}</div>
-  </button>`;
+  </button></div>`;
 }
 
 // ---------- view: trend ----------
@@ -494,7 +568,7 @@ function viewRecurring() {
     <header class="top"><h1>Ricorrenti</h1></header>
     ${active.length ? `<section class="hero" style="padding-bottom:20px">
       <div class="hero-label">Spese fisse, circa</div>
-      <div class="hero-total num">${splitEuro(eq)}<span class="cents" style="font-size:18px"> / mese</span></div>
+      <div class="hero-total num" data-count="${eq}" data-count-key="rec" data-suffix='<span class="cents" style="font-size:18px"> / mese</span>'>${splitEuro(eq)}<span class="cents" style="font-size:18px"> / mese</span></div>
       <div class="hero-delta">${active.length} ${active.length === 1 ? 'attiva' : 'attive'} · vengono aggiunte da sole alla data prevista</div>
     </section>` : ''}
     ${active.length ? `<div class="section-title"><span>Attive</span></div><div class="list">${active.map(row).join('')}</div>` : `
@@ -775,6 +849,7 @@ function openEntry({ mode = 'add', expense = null, rule = null, repeat = 'none' 
     if (c) {
       st.catId = c.dataset.cat;
       paintCats();
+      haptic();
       if (mode === 'add') {
         if (L.parseAmount(st.amt) > 0) save();
         else { shake(); toast('Prima scrivi l\'importo, poi tocca la categoria', { ms: 2500 }); }
@@ -808,12 +883,7 @@ function openEntry({ mode = 'add', expense = null, rule = null, repeat = 'none' 
   });
 
   $('#del-btn', sheet)?.addEventListener('click', () => {
-    if (mode === 'edit') {
-      const removed = expense;
-      S.expenses = S.expenses.filter((x) => x.id !== removed.id);
-      persist(); close(); refresh();
-      toast('Spesa eliminata', { action: 'Annulla', onAction: () => { S.expenses.push(removed); persist(); refresh(); } });
-    } else if (mode === 'rule') {
+    if (mode === 'edit') { close(); deleteExpense(expense.id); } else if (mode === 'rule') {
       if (!confirm('Eliminare questa spesa ricorrente? Le spese già registrate restano.')) return;
       S.recurring = S.recurring.filter((r) => r.id !== rule.id);
       S.expenses.forEach((x) => { if (x.recurringId === rule.id) delete x.recurringId; });
@@ -839,6 +909,56 @@ function openEntry({ mode = 'add', expense = null, rule = null, repeat = 'none' 
   sheet.tabIndex = -1;
   if (!coarse()) sheet.focus();
 }
+
+function deleteExpense(id) {
+  const removed = S.expenses.find((x) => x.id === id);
+  if (!removed) return;
+  S.expenses = S.expenses.filter((x) => x.id !== id);
+  persist(); refresh(); haptic();
+  toast('Spesa eliminata', { action: 'Annulla', onAction: () => { S.expenses.push(removed); persist(); refresh(); } });
+}
+
+// swipe left on an expense to delete it
+const SWIPE_T = 96;
+let sw = null;
+document.addEventListener('pointerdown', (e) => {
+  const row = e.target.closest('.swipe > .exp-row');
+  if (!row || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  sw = { row, wrap: row.parentElement, x0: e.clientX, y0: e.clientY, dx: 0, active: false, armed: false, id: e.pointerId };
+});
+document.addEventListener('pointermove', (e) => {
+  if (!sw || e.pointerId !== sw.id) return;
+  const dx = e.clientX - sw.x0; const dy = e.clientY - sw.y0;
+  if (!sw.active) {
+    if (dx < -10 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+      sw.active = true; sw.row.style.transition = 'none'; sw.wrap.classList.add('swiping');
+      try { sw.row.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    } else if (Math.abs(dy) > 10 || dx > 10) sw = null;
+    return;
+  }
+  sw.dx = Math.min(0, dx < -SWIPE_T ? -SWIPE_T + (dx + SWIPE_T) * 0.85 : dx);
+  sw.row.style.transform = `translateX(${sw.dx}px)`;
+  const armed = dx < -SWIPE_T;
+  if (armed !== sw.armed) { sw.armed = armed; sw.wrap.classList.toggle('armed', armed); haptic(); }
+});
+const swipeEnd = (e) => {
+  if (!sw || e.pointerId !== sw.id) return;
+  const s = sw; sw = null;
+  if (!s.active) return;
+  suppressClick = true; setTimeout(() => { suppressClick = false; }, 80);
+  s.row.style.transition = '';
+  if (s.armed && e.type === 'pointerup') {
+    s.row.style.transform = 'translateX(-110%)';
+    s.wrap.classList.add('removing');
+    setTimeout(() => deleteExpense(s.row.dataset.id), 230);
+  } else {
+    s.row.style.transform = '';
+    s.wrap.classList.remove('swiping', 'armed');
+  }
+};
+document.addEventListener('pointerup', swipeEnd);
+document.addEventListener('pointercancel', swipeEnd);
+window.addEventListener('click', (e) => { if (suppressClick) { e.stopPropagation(); e.preventDefault(); suppressClick = false; } }, true);
 
 // ---------- category detail (from month view) ----------
 
@@ -1011,6 +1131,115 @@ function openSearch() {
   if (!coarse()) setTimeout(() => $('#q', sheet).focus(), 350);
 }
 
+// ---------- monthly recap ----------
+
+function recapLines(r) {
+  const prevName = L.monthLabel(r.prevKey, false);
+  const lines = [];
+  if (r.prevTotal) {
+    const pct = Math.abs(Math.round((r.diffPct || 0) * 100));
+    lines.push(r.diff === 0 ? `Come a ${prevName}` : `${pct}% ${r.diff < 0 ? 'in meno' : 'in più'} di ${prevName} (${r.diff < 0 ? '−' : '+'}${eur0(Math.abs(r.diff))})`);
+  }
+  return lines;
+}
+
+function openRecap(key) {
+  const r = L.monthRecap(S.expenses, S.categories, key, S.settings.totalLimit);
+  S.settings.recapSeen = { ...(S.settings.recapSeen || {}), [key]: true };
+  persist();
+  const month = L.monthLabel(key);
+  const tile = (label, c, main, sub) => `<div class="card rtile">
+      <div class="k">${label}</div>
+      ${c ? `<div class="rtile-row">${chipIc(c, 'sm')}<b>${esc(main)}</b></div>` : `<div class="rtile-row"><b>${esc(main)}</b></div>`}
+      <div class="s num">${sub}</div></div>`;
+  const tiles = [];
+  if (r.top) tiles.push(tile('Hai speso di più in', r.top.category, r.top.category.name, `${eur0(r.top.amount)} · ${Math.round(r.top.share * 100)}% del totale`));
+  if (r.biggest) tiles.push(tile('Spesa più grande', cat(r.biggest.categoryId), r.biggest.note || cat(r.biggest.categoryId).name, `${eur(r.biggest.amount)} · ${shortDate(r.biggest.date)}`));
+  if (r.grew) tiles.push(tile('Cresciuta di più', r.grew.category, r.grew.category.name, `<span class="delta-up">+${eur0(r.grew.diff)}</span> sul mese prima`));
+  if (r.dropped) tiles.push(tile('Scesa di più', r.dropped.category, r.dropped.category.name, `<span class="delta-down">−${eur0(-r.dropped.diff)}</span> sul mese prima`));
+  const lim = [...(r.totalLimit ? [{ name: 'Totale del mese', ...r.totalLimit, c: null }] : []), ...r.limits.map((l) => ({ name: l.category.name, spent: l.spent, limit: l.limit, ok: l.ok, c: l.category }))];
+  const okCount = lim.filter((l) => l.ok).length;
+
+  const html = `
+    ${sheetHead(`Riepilogo di ${L.monthLabel(key, false)}`)}
+    <div class="sheet-body">
+      <section class="hero recap-hero">
+        <div class="hero-label">${month}</div>
+        <div class="hero-total num" data-count="${r.total}" data-count-key="recap-${key}">${splitEuro(r.total)}</div>
+        ${recapLines(r).map((l) => `<div class="hero-delta">${icon(r.diff <= 0 ? 'arrowDown' : 'arrowUp')} ${l}</div>`).join('')}
+        <div class="hero-chips">
+          <span class="hero-chip">${icon('tag')} ${r.count} spese</span>
+          <span class="hero-chip">${icon('calendar')} ${eur0(r.avgPerDay)} al giorno</span>
+          ${lim.length ? `<span class="hero-chip">${icon('target')} ${okCount}/${lim.length} limiti rispettati</span>` : ''}
+        </div>
+      </section>
+      <div class="rtiles">${tiles.join('')}</div>
+      ${lim.length ? `<div class="section-title"><span>Limiti</span></div><div class="list">${lim.map((l) => `
+        <div class="row">${l.c ? `<span class="ico-tile c-${l.c.color}">${icon(l.c.icon)}</span>` : `<span class="ico-tile" style="--c:var(--accent)">${icon('target')}</span>`}
+          <span class="label">${esc(l.name)}<small class="num">${eur0(l.spent)} su ${eur0(l.limit)}</small></span>
+          <span class="${l.ok ? 'delta-down' : 'delta-up'}" style="font-weight:700">${l.ok ? '✓ Rispettato' : `+${eur0(l.spent - l.limit)}`}</span></div>`).join('')}</div>` : ''}
+    </div>
+    <div class="sheet-foot"><button class="btn" type="button" id="recap-share">${icon('share')} Salva come immagine</button></div>`;
+  const { sheet } = openSheet(html, { full: true });
+  animateCounts(sheet);
+  haptic();
+  $('#recap-share', sheet).addEventListener('click', async () => {
+    const canvas = drawRecap(r, lim, okCount);
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+    await deliverFile(`riepilogo-${key}.png`, 'image/png', blob);
+  });
+  render(false);
+}
+
+function drawRecap(r, lim, okCount) {
+  const W = 1080; const H = 1350;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  const font = (w, s) => `${w} ${s}px -apple-system, "SF Pro Rounded", system-ui, sans-serif`;
+  const bg = g.createRadialGradient(W, 0, 0, W, 0, H * 1.25);
+  bg.addColorStop(0, '#6D62F5'); bg.addColorStop(0.7, '#24206B'); bg.addColorStop(1, '#17144A');
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  g.fillStyle = 'rgba(255,255,255,0.06)'; g.beginPath(); g.arc(W - 60, H - 80, 300, 0, Math.PI * 2); g.fill();
+
+  g.fillStyle = 'rgba(255,255,255,0.75)'; g.font = font(600, 40);
+  g.fillText(`Riepilogo · ${L.monthLabel(r.key)}`, 80, 140);
+  g.fillStyle = '#fff'; g.font = font(800, 150);
+  g.fillText(eur(r.total).replace(/,\d\d$/, ''), 80, 310);
+  g.font = font(500, 40); g.fillStyle = 'rgba(255,255,255,0.85)';
+  let y = 380;
+  recapLines(r).forEach((l) => { g.fillText(l, 80, y); y += 54; });
+  g.fillText(`${r.count} spese · ${eur0(r.avgPerDay)} al giorno`, 80, y); y += 90;
+
+  // category bars
+  const [from, to] = L.monthRange(r.key);
+  const s = L.sumBy(L.expensesInRange(S.expenses, from, to));
+  const rows = S.categories.map((c) => ({ c, v: s.by[c.id] || 0 })).filter((x) => x.v > 0).sort((a, b) => b.v - a.v).slice(0, 6);
+  const probe = document.createElement('span'); probe.className = 'on-dark'; document.body.appendChild(probe);
+  rows.forEach(({ c, v }) => {
+    probe.className = `on-dark c-${c.color}`;
+    const col = getComputedStyle(probe).getPropertyValue('--c').trim() || '#fff';
+    g.fillStyle = '#fff'; g.font = font(650, 40); g.fillText(c.name, 80, y);
+    g.textAlign = 'right'; g.fillText(eur0(v), W - 80, y); g.textAlign = 'left';
+    g.fillStyle = 'rgba(255,255,255,0.15)'; roundRect(g, 80, y + 22, W - 160, 18, 9); g.fill();
+    g.fillStyle = col; roundRect(g, 80, y + 22, Math.max(18, (W - 160) * (v / (rows[0].v || 1))), 18, 9); g.fill();
+    y += 112;
+  });
+  probe.remove();
+  if (lim.length) {
+    g.fillStyle = 'rgba(255,255,255,0.85)'; g.font = font(600, 40);
+    g.fillText(`${okCount} limiti rispettati su ${lim.length}`, 80, Math.min(y + 20, H - 120));
+  }
+  g.fillStyle = 'rgba(255,255,255,0.5)'; g.font = font(600, 32);
+  g.fillText('Spese', 80, H - 60);
+  return cv;
+}
+
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+
 // ---------- install help ----------
 
 let deferredPrompt = null;
@@ -1041,7 +1270,7 @@ function openInstallHelp() {
 // ---------- files ----------
 
 async function deliverFile(filename, mime, content, { preferShare = true } = {}) {
-  const blob = new Blob([content], { type: mime });
+  const blob = content instanceof Blob ? content : new Blob([content], { type: mime });
   if (preferShare && coarse() && navigator.canShare) {
     const file = new File([blob], filename, { type: mime });
     if (navigator.canShare({ files: [file] })) {
@@ -1101,8 +1330,13 @@ document.addEventListener('click', (e) => {
   switch (a) {
     case 'add': openEntry(); break;
     case 'add-rule': openEntry({ repeat: 'monthly' }); break;
-    case 'month-prev': ui.month = L.shiftMonth(ui.month, -1); render(); break;
-    case 'month-next': ui.month = L.shiftMonth(ui.month, 1); render(); break;
+    case 'month-prev': ui.month = L.shiftMonth(ui.month, -1); ui.slide = 'prev'; haptic(); render(); break;
+    case 'month-next': ui.month = L.shiftMonth(ui.month, 1); ui.slide = 'next'; haptic(); render(); break;
+    case 'recap-dismiss':
+      e.stopPropagation();
+      S.settings.recapSeen = { ...(S.settings.recapSeen || {}), [el.dataset.key]: true }; persist(); render(false);
+      break;
+    case 'recap': openRecap(el.dataset.key); break;
     case 'month-today': ui.month = L.monthKey(today()); render(); break;
     case 'search': openSearch(); break;
     case 'cat-detail': openCategoryDetail(el.dataset.id); break;

@@ -140,3 +140,26 @@ test('validateBackup', () => {
   assert.equal(L.validateBackup({ app: 'spese', expenses: [], categories: [], recurring: [] }), null);
   assert.ok(L.validateBackup({ app: 'spese', expenses: [{ id: 1 }], categories: [], recurring: [] }));
 });
+
+test('monthRecap summarises a month against the previous one', () => {
+  const cats = [{ id: 'a', name: 'A', limit: 1000 }, { id: 'b', name: 'B', limit: null }, { id: 'c', name: 'C', limit: 100 }];
+  const ex = [
+    { id: '1', amount: 1200, categoryId: 'a', date: '2026-10-03', note: 'x' },
+    { id: '2', amount: 300, categoryId: 'b', date: '2026-10-20', note: 'big?' },
+    { id: '3', amount: 200, categoryId: 'a', date: '2026-09-03' },
+    { id: '4', amount: 900, categoryId: 'b', date: '2026-09-04' },
+  ];
+  const r = L.monthRecap(ex, cats, '2026-10', 2000);
+  assert.equal(r.total, 1500);
+  assert.equal(r.prevTotal, 1100);
+  assert.equal(r.diff, 400);
+  assert.equal(r.count, 2);
+  assert.equal(r.top.category.id, 'a');
+  assert.equal(r.grew.category.id, 'a');
+  assert.equal(r.grew.diff, 1000);
+  assert.equal(r.dropped.category.id, 'b');
+  assert.equal(r.biggest.id, '1');
+  assert.deepEqual(r.limits.map((l) => [l.category.id, l.ok]), [['a', false], ['c', true]]);
+  assert.equal(r.totalLimit.ok, true);
+  assert.equal(r.avgPerDay, Math.round(1500 / 31));
+});
