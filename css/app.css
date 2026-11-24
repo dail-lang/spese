@@ -531,18 +531,41 @@ button, a, label, .teaser { touch-action: manipulation; -webkit-user-select: non
 .donut { animation: donut-in .7s cubic-bezier(.2, .9, .25, 1); }
 @keyframes donut-in { from { opacity: 0; transform: rotate(-200deg) scale(.85); } }
 
-/* swipe to delete */
-.swipe { position: relative; overflow: hidden; }
+/* swipe to delete, like "slide to power off" */
+.swipe { position: relative; overflow: hidden; --dx: 0px; --p: 0; }
 .swipe-bg {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: flex-end; gap: 6px;
-  padding-right: 22px; background: var(--over); color: #fff; font-weight: 700; font-size: 14px;
-  opacity: 0; transition: opacity .15s;
+  position: absolute; inset: 0; background: var(--over); color: #fff; opacity: 0; transition: opacity .2s;
 }
-.swipe-bg .ic { width: 20px; height: 20px; transition: transform .2s cubic-bezier(.3, 1.6, .5, 1); }
 .swipe.swiping .swipe-bg { opacity: 1; }
-.swipe.armed .swipe-bg .ic { transform: scale(1.25); }
-.swipe .exp-row { position: relative; background: var(--surface); touch-action: pan-y; transition: transform .25s cubic-bezier(.2, .9, .25, 1); }
-.swipe.removing { animation: collapse .25s .15s ease forwards; }
+.swipe-text {
+  font-size: 15px; font-weight: 600; letter-spacing: .01em;
+  white-space: nowrap; opacity: calc((0.82 - var(--p)) * 5);
+  background: linear-gradient(100deg, rgba(255,255,255,.45) 35%, #fff 50%, rgba(255,255,255,.45) 65%);
+  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shimmer 2.2s linear infinite;
+}
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+.swipe-label {
+  position: absolute; top: 0; bottom: 0; right: 0; left: calc(100% + var(--dx) + 56px);
+  display: grid; place-items: center; overflow: hidden;
+}
+.swipe-label > span { grid-area: 1 / 1; }
+.swipe-release { font-size: 15px; font-weight: 700; white-space: nowrap; opacity: 0; transform: scale(.9); transition: opacity .2s, transform .25s cubic-bezier(.3, 1.6, .5, 1); }
+.swipe.armed .swipe-release { opacity: 1; transform: none; }
+.swipe.returning .swipe-label { transition: left .45s cubic-bezier(.22, .9, .3, 1); }
+.swipe-knob {
+  position: absolute; top: 50%; left: 100%; width: 44px; height: 44px; margin-top: -22px;
+  border-radius: 50%; background: #fff; color: var(--over);
+  display: grid; place-items: center; box-shadow: 0 2px 8px rgba(0,0,0,.2);
+  transform: translateX(calc(var(--dx) + 8px));
+  transition: background .2s, color .2s;
+}
+.swipe-knob .ic { width: 20px; height: 20px; transition: transform .25s cubic-bezier(.3, 1.6, .5, 1); }
+.swipe.armed .swipe-knob .ic { transform: scale(1.15) rotate(-8deg); }
+.swipe .exp-row { position: relative; background: var(--surface); touch-action: pan-y; }
+.swipe.returning .exp-row, .swipe.returning .swipe-knob { transition: transform .45s cubic-bezier(.22, .9, .3, 1); }
+.swipe.returning .swipe-text { transition: opacity .3s; }
+.swipe.removing { animation: collapse .28s .2s ease forwards; }
 @keyframes collapse { to { height: 0; opacity: 0; } }
 
 /* recap */

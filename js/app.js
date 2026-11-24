@@ -2,7 +2,7 @@ import * as L from './logic.js';
 import { loadState, saveState, requestPersistence, uid, emptyState } from './store.js';
 import { icon, CATEGORY_ICONS, CATEGORY_COLORS } from './icons.js';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 
 let S = null; // persisted state
 const ui = {
@@ -454,7 +454,7 @@ function expRow(e, { withDate = false } = {}) {
   const c = cat(e.categoryId);
   const title = e.note ? esc(e.note) : esc(c.name);
   const sub = [e.note ? esc(c.name) : '', withDate ? shortDate(e.date) : ''].filter(Boolean).join(' · ');
-  return `<div class="swipe"><div class="swipe-bg" aria-hidden="true">${icon('trash')}<span>Elimina</span></div>
+  return `<div class="swipe"><div class="swipe-bg" aria-hidden="true"><span class="swipe-label"><span class="swipe-text">‹ scorri per eliminare</span><span class="swipe-release">Rilascia per eliminare</span></span><span class="swipe-knob">${icon('trash')}</span></div>
   <button class="exp-row" type="button" data-action="edit-exp" data-id="${e.id}">
     ${chipIc(c, 'sm')}
     <div class="exp-main"><div class="exp-title">${title}</div>
@@ -919,7 +919,8 @@ function deleteExpense(id) {
 }
 
 // swipe left on an expense to delete it
-const SWIPE_T = 96;
+// Works like iPhone's "slide to power off": the row must be dragged almost all the way.
+const SWIPE_DONE = 0.82;
 let sw = null;
 document.addEventListener('pointerdown', (e) => {
   const row = e.target.closest('.swipe > .exp-row');
@@ -936,10 +937,14 @@ document.addEventListener('pointermove', (e) => {
     } else if (Math.abs(dy) > 10 || dx > 10) sw = null;
     return;
   }
-  sw.dx = Math.min(0, dx < -SWIPE_T ? -SWIPE_T + (dx + SWIPE_T) * 0.85 : dx);
+  const w = sw.row.offsetWidth;
+  sw.dx = Math.max(-w, Math.min(0, dx));
+  const prog = -sw.dx / w;
   sw.row.style.transform = `translateX(${sw.dx}px)`;
-  const armed = dx < -SWIPE_T;
-  if (armed !== sw.armed) { sw.armed = armed; sw.wrap.classList.toggle('armed', armed); haptic(); }
+  sw.wrap.style.setProperty('--dx', `${sw.dx}px`);
+  sw.wrap.style.setProperty('--p', prog.toFixed(3));
+  const armed = prog >= SWIPE_DONE;
+  if (armed !== sw.armed) { sw.armed = armed; sw.wrap.classList.toggle('armed', armed); if (armed) haptic(); }
 });
 const swipeEnd = (e) => {
   if (!sw || e.pointerId !== sw.id) return;
@@ -948,12 +953,17 @@ const swipeEnd = (e) => {
   suppressClick = true; setTimeout(() => { suppressClick = false; }, 80);
   s.row.style.transition = '';
   if (s.armed && e.type === 'pointerup') {
-    s.row.style.transform = 'translateX(-110%)';
+    s.wrap.classList.add('returning');
+    s.row.style.transform = 'translateX(-100%)';
+    s.wrap.style.setProperty('--dx', `${-s.row.offsetWidth}px`);
     s.wrap.classList.add('removing');
     setTimeout(() => deleteExpense(s.row.dataset.id), 230);
   } else {
+    s.wrap.classList.add('returning');
     s.row.style.transform = '';
-    s.wrap.classList.remove('swiping', 'armed');
+    s.wrap.style.setProperty('--dx', '0px');
+    s.wrap.style.setProperty('--p', '0');
+    setTimeout(() => s.wrap.classList.remove('swiping', 'armed', 'returning'), 450);
   }
 };
 document.addEventListener('pointerup', swipeEnd);

@@ -1,5 +1,5 @@
 // Offline support: precache the app shell, serve from cache, refresh in the background.
-const VERSION = 'spese-v1.1.0';
+const VERSION = 'spese-v1.1.1';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'js/app.js', 'js/logic.js', 'js/store.js', 'js/icons.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
